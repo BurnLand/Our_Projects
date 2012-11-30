@@ -1,0 +1,616 @@
+Unit UMainFunc;
+interface
+
+uses
+   Grids, DB, ADODB, DBGrids, DateUtils, SysUtils, Windows, Messages,
+   Variants, Classes, Graphics, Controls, Forms,
+   Dialogs, XPMan, StdCtrls, ExtCtrls, SettingForm;
+
+type
+   GrPoint = record
+      quantity: string[15];
+      picking: string[15];
+      date: string[15];
+   end;
+
+function FirstDate: string;   // возвращает вчерашнюю дату
+function SecondDate: string;  // возвращает завтрашнюю дату
+function BackWeek: string; // возвращает дату 2 недели назад
+function BackMonth: string; // возвращает дату 2 месяца назад
+function BackYear: string; // возвращает дату 1 год назад
+function WeekPlus: string; // возвращает дату неделю назад и
+function WeekMinus: string; // неделю вперед для синхронизации с WMS
+function CurrentDate: string; // возвращает текущую дату в формате DD:MM:YYYY; DayOfWeek
+procedure NameToRus(InpCol: TColumn);  // присваивает русские имена столбцов
+function WidthByName(InpCol: TColumn): integer; // по имени столбца возвращает делитель для определения ширины
+procedure GridColumnFit(var InpGrid: TDBGrid); // присваивает TDBGrid'у различную ширину столбцов и имена столбцов
+procedure LoadSettings(InpForm: TForm; InpConnect: TADOConnection;
+                       tDate: TTimer; tScreen: TTimer; tWMS: TTimer); // загрузка настроек из файла
+procedure DoSettingsForm(Err: boolean);
+procedure ScreenNumber(var ScrCnt: byte);
+function SyncWMS(): boolean;
+procedure DrawGraph(Screen: TImage; var inDay: array of GrPoint; var inMonth: array of GrPoint; var inYear: array of GrPoint);
+procedure DoGraphSQL(Query: TADOQuery; var inDay: array of GrPoint; var inMonth: array of GrPoint; var inYear: array of GrPoint);
+function MakeKoef(var InAr: array of GrPoint; Count: integer; Limit: integer): GrPoint;
+
+const
+   SetCount = 9;
+   LeftField = 120;
+   RightField = 40;
+   Color1 = clBlue;
+   Color2 = clRed;
+
+var
+   SetArray: array [1..SetCount] of string; // список настроек
+   //1 - IP Adress
+   //2 - Login
+   //3 - Password
+   //4 - Date refresh
+   //5 - Screen refresh
+   //6 - WMS refresh
+   //7 - on/off WMS Sync
+   //8 - on/off Graph screen
+   //9 - by day, by month, by year
+   parts: byte;
+
+implementation
+
+//------------------------- Функции выставления периода дат --------------------
+function FirstDate: string; // отнимает 1 день
+begin
+   Result:= IntToStr(YearOf(IncDay(Date,-1)))+'-'+
+            IntToStr(MonthOf(IncDay(Date,-1)))+'-'+
+            IntToStr(DayOf(IncDay(Date,-1)));
+end;
+
+function SecondDate: string; // прибавляет 1 день
+begin
+   Result:= IntToStr(YearOf(IncDay(Date)))+'-'+
+            IntToStr(MonthOf(IncDay(Date)))+'-'+
+            IntToStr(DayOf(IncDay(Date)));
+end;
+
+function BackWeek: string; // 2 недели назад
+begin
+   Result:= IntToStr(YearOf(IncWeek(Date,-2)))+'-'+
+            IntToStr(MonthOf(IncWeek(Date,-2)))+'-'+
+            IntToStr(DayOf(IncWeek(Date,-2)));
+end;
+
+function BackMonth: string; // 2 месяца назад
+begin
+   Result:= IntToStr(YearOf(IncMonth(Date,-2)))+'-'+
+            IntToStr(MonthOf(IncMonth(Date,-2)))+'-'+
+            IntToStr(DayOf(IncMonth(Date,-2)));
+end;
+
+function BackYear: string; // год назад
+begin
+   Result:= IntToStr(YearOf(IncYear(Date,-1)))+'-'+
+            IntToStr(MonthOf(IncYear(Date,-1)))+'-'+
+            IntToStr(DayOf(IncYear(Date,-1)));
+end;
+
+function WeekPlus: string; // возвращает дату неделю назад
+begin
+   Result:= IntToStr(YearOf(IncDay(Date,7)))+'-'+
+            IntToStr(MonthOf(IncDay(Date,7)))+'-'+
+            IntToStr(DayOf(IncDay(Date,7)));
+end;
+
+function WeekMinus: string; // неделю вперед для синхронизации с WMS
+begin
+   Result:= IntToStr(YearOf(IncDay(Date,-7)))+'-'+
+            IntToStr(MonthOf(IncDay(Date,-7)))+'-'+
+            IntToStr(DayOf(IncDay(Date,-7)));
+end;
+
+function CurrentDate: string; // возвращает текущую дату
+const
+   Month: Array [1..12] of String = ('Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн',
+                                     'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек');
+   Week: Array [1..7] of String =
+                     ('Воскресенье',
+                      'Понедельник',
+                      'Вторник',
+                      'Среда',
+                      'Четверг',
+                      'Пятница',
+                      'Суббота');
+
+begin
+   result := IntToStr(DayOf(Date)) +
+       ' ' + Month[MonthOf(Date)] +
+       ' ' + IntToStr(YearOf(Date)) +
+      '; ' + Week[DayOfWeek(Date)];
+end;
+
+//------------------------ Русификатор столбцов --------------------------------
+procedure NameToRus(InpCol: TColumn);
+begin
+ {1}if (InpCol.FieldName = 'Documents') or (InpCol.FieldName = 'DocSum') then
+       InpCol.Title.Caption:= 'Док-ты';
+ {2}if InpCol.FieldName = 'Number' then
+       InpCol.Title.Caption:= 'Номер';
+ {3}if (InpCol.FieldName = 'Picking') or (InpCol.FieldName = 'picking') then
+       InpCol.Title.Caption:= 'Пикинги';
+ {4}if (InpCol.FieldName = 'Quantity') or (InpCol.FieldName = 'quantity')then
+       InpCol.Title.Caption:= 'Кол-во шт';
+ {5}if (InpCol.FieldName = 'Boxes') or (InpCol.FieldName = 'boxes') then
+       InpCol.Title.Caption:= 'Короба';
+ {6}if InpCol.FieldName = 'pcs' then
+       InpCol.Title.Caption:= 'PCS';
+ {7}if (InpCol.FieldName = 'Mass') or (InpCol.FieldName = 'mass') then
+       InpCol.Title.Caption:= 'Масса';
+ {8}if (InpCol.FieldName = 'Volume') or (InpCol.FieldName = 'volume') then
+       InpCol.Title.Caption:= 'Объем';
+ {9}if InpCol.FieldName = 'Date_Plans' then
+       InpCol.Title.Caption:= 'Д/Плана';
+{10}if InpCol.FieldName = 'Status' then
+       InpCol.Title.Caption:= 'Статус';
+{11}if InpCol.FieldName = 'AC' then
+       InpCol.Title.Caption:= 'Ассорт';
+{12}if InpCol.FieldName = 'DOC' then
+       InpCol.Title.Caption:= 'Док';
+{13}if InpCol.FieldName = 'Drivers' then
+       InpCol.Title.Caption:= 'Водитель';
+{14}if InpCol.FieldName = 'Forwarder' then
+       InpCol.Title.Caption:= 'Экспедитор';
+{15}if InpCol.FieldName = 'Date_Delivery' then
+       InpCol.Title.Caption:= 'Д/Доставки';
+end;
+
+//----------------------- Присвоение ширины по имени ---------------------------
+function WidthByName(InpCol: TColumn): integer;
+begin
+   Result:= 10;
+   if InpCol.Title.Caption = 'Док-ты' then
+      Result:= 16;
+   if InpCol.Title.Caption = 'Номер' then
+      Result:= 13;
+   if InpCol.Title.Caption = 'Пикинги' then
+      Result:= 15;
+   if InpCol.Title.Caption = 'Кол-во шт' then
+      Result:= 15;
+   if InpCol.Title.Caption = 'Короба' then
+      Result:= 14;
+   if InpCol.Title.Caption = 'Масса' then
+      Result:= 12;
+   if InpCol.Title.Caption = 'Объем' then
+      Result:= 16;
+   if InpCol.Title.Caption = 'Д/Плана' then
+      Result:= 13;
+   if InpCol.Title.Caption = 'Статус' then
+      Result:= 12;
+   if InpCol.Title.Caption = 'Ассорт' then
+      Result:= 15;
+   if InpCol.Title.Caption = 'Док' then
+      Result:= 26;
+   if InpCol.Title.Caption = 'Водитель' then
+      Result:= 5;
+   if InpCol.Title.Caption = 'Экспедитор' then
+      Result:= 5;
+   if InpCol.Title.Caption = 'Д/Доставки' then
+      Result:= 11;
+   if InpCol.Title.Caption = 'PCS' then
+      Result:= 15;
+end;
+
+//------------------------ Выравнивание и подгон столбцов ----------------------
+procedure GridColumnFit(var InpGrid: TDBGrid);
+var
+   i: byte;
+
+begin
+   for i:= 0 to InpGrid.Columns.Count - 1 do
+   begin
+      NameToRus(InpGrid.Columns.Items[i]);
+      InpGrid.Columns.Items[i].Width:= Round(
+         InpGrid.Width / WidthByName(InpGrid.Columns.Items[i]));
+   end;
+end;
+
+//------------------------ Загрузка настроек -----------------------------------
+procedure LoadSettings(InpForm: TForm; InpConnect: TADOConnection;
+                       tDate: TTimer; tScreen: TTimer; tWMS: TTimer);
+var
+   SetFile: TextFile;
+   i:byte;
+
+begin
+   try
+      AssignFile(SetFile, 'settings.cfg');
+      Reset(SetFile);
+      for i:= 1 to SetCount do
+         ReadLn(SetFile, SetArray[i]);
+      CloseFile(SetFile);
+      for i:= 1 to 3 do
+      if SetArray[9][i] = '1' then
+         inc(parts);
+      InpConnect.ConnectionString:=
+      'Provider=SQLOLEDB.1;Password=' + SetArray[3] +
+      ';Persist Security Info=True;User ID=' + SetArray[2] +
+      ';Initial Catalog=Reports;Data Source=' + SetArray[1] +
+      ';Use Procedure for Prepare=1;Auto Translate=True;Packet Size=4096;' +
+      'Workstation ID=TEAM-ARTEM;Use Encryption for Data=False;' +
+      'Tag with column collation when possible=False';
+      InpConnect.Connected:= True;
+      tDate.Interval:= StrToInt(SetArray[4]) * 1000;
+      tScreen.Interval:= StrToInt(SetArray[5]) * 1000;
+      tWMS.Interval:= StrToInt(SetArray[6]) * 60000;
+   except
+      ShowMessage('Возникла ошибка при загрузке настроек' + #13 +
+      'Дальнейшая работа невозможна' + #13 +
+      'Нажмите ОК для выхода');
+      DoSettingsForm(true);
+      InpForm.Close;
+   end;
+end;
+
+//------------------------- Процедура окна настроек ----------------------------
+procedure DoSettingsForm(Err: boolean);
+begin
+   // инициализируем форму
+   with SetForm do
+   begin
+      Height:= 200;
+      Width:= 500;
+      Position:= poDesktopCenter;
+      Caption:= 'Настройки программы';
+      leAdress.Top:= 25;
+      leLogin.Top:= leAdress.Top + leAdress.Height + 20;
+      lePass.Top:= leLogin.Top + leLogin.Height + 20;
+      leAdress.Left:= 20;
+      leLogin.Left:= leAdress.Left;
+      lePass.Left:= leAdress.Left;
+      seDateRefresh.Left:= leAdress.Left + leAdress.Width + 40;
+      seScreenRefresh.Left:= seDateRefresh.Left;
+      seWMSRefresh.Left:= seDateRefresh.Left;
+      lbDateRefresh.Left:= seDateRefresh.Left;
+      lbScreenRefresh.Left:= seDateRefresh.Left;
+      lbWMSRefresh.Left:= seDateRefresh.Left;
+      seDateRefresh.Top:= leAdress.Top;
+      seScreenRefresh.Top:= leLogin.Top;
+      seWMSRefresh.Top:= lePass.Top;
+      lbDateRefresh.Top:= leAdress.Top - 16;
+      lbScreenRefresh.Top:= leLogin.Top - 16;
+      lbWMSRefresh.Top:= lePass.Top - 16;
+      cbWMSSync.Top:= 20;
+      cbWMSSync.Left:= seDateRefresh.Left + seDateRefresh.Width + 20;
+      cbGraph.Top:= cbWMSSync.Top + cbWMSSync.Height + 10;
+      cbGraph.Left:= cbWMSSync.Left;
+      GroupBox1.Top:= cbGraph.Top + cbGraph.Height + 10;
+      GroupBox1.Left:= cbWMSSync.Left;
+   end;
+
+   if not Err then
+   begin
+      SetForm.btCancel.Visible:= true;
+      SetForm.leAdress.Text:= SetArray[1];
+      SetForm.leLogin.Text:= SetArray[2];
+      SetForm.lePass.Text:= SetArray[3];
+      SetForm.seDateRefresh.Text:= SetArray[4];
+      SetForm.seScreenRefresh.Text:= SetArray[5];
+      SetForm.seWMSRefresh.Text:= SetArray[6];
+
+      if SetArray[7] = '1' then
+         SetForm.cbWMSSync.Checked:= true
+      else
+         SetForm.cbWMSSync.Checked:= false;
+      SetForm.cbWMSSyncClick(Application);
+      
+      if SetArray[8] = '1' then
+         SetForm.cbGraph.Checked:= true
+      else
+         SetForm.cbGraph.Checked:= false;
+      SetForm.cbGraphClick(Application);
+      if SetArray[9][1] = '1' then
+         SetForm.cbByDay.Checked:= true
+      else
+         SetForm.cbByDay.Checked:= false;
+      if SetArray[9][2] = '1' then
+         SetForm.cbByMonth.Checked:= true
+      else
+         SetForm.cbByMonth.Checked:= false;
+      if SetArray[9][3] = '1' then
+         SetForm.cbByYear.Checked:= true
+      else
+         SetForm.cbByYear.Checked:= false;
+   end
+   else
+   begin
+      SetForm.btCancel.Visible:= false;
+      SetForm.leAdress.Text:= 'Not Configured';
+      SetForm.leLogin.Text:= 'Not Configured';
+      SetForm.lePass.Text:= 'Not Configured';
+      SetForm.seDateRefresh.Text:= 'Not Configured';
+      SetForm.seScreenRefresh.Text:= 'Not Configured';
+      SetForm.seWMSRefresh.Text:= 'Not Configured';
+   end;
+   SetForm.Show;
+end;
+
+//-------------------- Переключатель счетчика экранов --------------------------
+procedure ScreenNumber(var ScrCnt: byte);
+var Scr: byte;
+begin
+   if SetArray[8] = '1' then
+      Scr:= 3
+   else
+      Scr:= 2;
+   if not (ScrCnt = Scr) then
+      inc(ScrCnt)
+   else
+      ScrCnt:= 1;
+   //ScrCnt:= 3;
+end;
+
+//---------------------- Проверка на синхронизацию с WMS -----------------------
+function SyncWMS(): boolean;
+begin
+   if SetArray[7] = '1' then
+      Result:= true
+   else
+      Result:= false;
+end;
+
+//---------------- считаем коэффициент для масштабирования графика -------------
+function MakeKoef(var InAr: array of GrPoint; Count: integer; Limit: integer): GrPoint;
+var
+   i: byte;
+   temp: GrPoint;
+
+begin
+   with temp do
+   begin
+      quantity:= '0';
+      picking:= '0';
+      date:= '0';
+   end;
+
+   for i:= 1 to Count do
+   begin
+      if StrToInt(temp.quantity) < StrToInt(InAr[i].quantity) then
+         temp.quantity:= InAr[i].quantity;
+      if StrToInt(temp.picking) < StrToInt(InAr[i].picking) then
+         temp.picking:= InAr[i].picking;
+   end;
+
+   Result.quantity:= IntToStr(Trunc(StrToInt(temp.quantity) / Limit));
+   Result.picking:= IntToStr(Trunc(StrToInt(temp.picking) / Limit));
+end;
+
+//------------------------------ Рисуем графики --------------------------------
+procedure DrawGraph(Screen: TImage; var inDay: array of GrPoint;
+                                    var inMonth: array of GrPoint;
+                                    var inYear: array of GrPoint);
+var
+   i: byte;
+   Square: TRect;
+   one: integer;
+   Current: integer;
+   step: integer;
+   Koef: GrPoint;
+   wait: tPoint;
+
+begin
+   // подготавливаем экран для рисования
+   Screen.Picture.Bitmap.Height:= Screen.Height;
+   Screen.Picture.Bitmap.Width:= Screen.Width;
+   Screen.Canvas.Brush.Color:= clWhite;
+   Square.Top:= 0;
+   Square.Left:= 0;
+   Square.Bottom:= Screen.Height;
+   Square.Right:= Screen.Width;
+   Screen.Canvas.FillRect(Square);
+   Screen.Canvas.Pen.Color:= clBlack;
+   Screen.Canvas.Rectangle(Square);
+   one:= trunc(Screen.Picture.Height/parts) - 20;
+   Screen.Canvas.MoveTo(0,0);
+
+   // рисуем оси
+   for i:= 1 to parts do
+   begin
+      Screen.Canvas.MoveTo(LeftField, Screen.Canvas.PenPos.Y + 5);
+      Screen.Canvas.LineTo(LeftField, Screen.Canvas.PenPos.Y + one);
+      Screen.Canvas.LineTo(Screen.Picture.Width - RightField, Screen.Canvas.PenPos.Y);
+      Screen.Canvas.MoveTo(LeftField, Screen.Canvas.PenPos.Y + 15);
+   end;
+   Screen.Canvas.Font.Color:= clWhite;
+   Screen.Canvas.Brush.Color:= Color1;
+   Screen.Canvas.TextOut(10,5,'Количество штук');
+   Screen.Canvas.Brush.Color:= Color2;
+   Screen.Canvas.TextOut(32,Screen.Canvas.PenPos.Y+15,'Пикинги');
+   Screen.Canvas.Font.Color:= clBlack;
+   Screen.Canvas.Brush.Color:= clWhite;
+   Screen.Canvas.MoveTo(0,0);
+
+   //рисуем график по дням
+   if SetArray[9][1] = '1' then
+   begin
+      Screen.Canvas.MoveTo(LeftField, Screen.Canvas.PenPos.Y + one + 5);
+      Current:= Screen.Canvas.PenPos.Y;
+      step:= Round((Screen.Picture.Width - LeftField - RightField) / 14);
+      try
+         Koef:= MakeKoef(inDay, 14, one);
+         Screen.Canvas.Pen.Color:= Color1;
+         for i:= 1 to 14 do
+            Screen.Canvas.LineTo(Screen.Canvas.PenPos.X+step, Current - Trunc(StrToInt(inDay[i].quantity) / StrToInt(Koef.quantity)));
+         Screen.Canvas.Pen.Color:= Color2;
+         Screen.Canvas.MoveTo(LeftField, Current);
+         for i:= 1 to 14 do
+         begin
+            wait.X:= Screen.Canvas.PenPos.X + step;
+            Screen.Canvas.LineTo(Screen.Canvas.PenPos.X+step, Current - Trunc(StrToInt(inDay[i].picking) / (StrToInt(Koef.picking)+5)));
+            wait.Y:= Screen.Canvas.PenPos.Y;
+            Screen.Canvas.Pen.Color:= clBlack;
+            Screen.Canvas.MoveTo(wait.X, Current - 3);
+            Screen.Canvas.LineTo(wait.X, Current + 1);
+            Screen.Canvas.MoveTo(LeftField, wait.Y);
+            Screen.Canvas.LineTo(Screen.Canvas.PenPos.X-3, wait.Y);
+            Screen.Canvas.Pen.Color:= Color2;
+            Screen.Canvas.TextOut(wait.X-12, Current + 2, inDay[i].date);
+            Screen.Canvas.MoveTo(wait.X, wait.Y);
+         end;
+      except
+         sleep(1);
+      end;
+      Screen.Canvas.MoveTo(LeftField,Current + 15);
+   end;
+
+   // рисуем график по месяцам
+   if SetArray[9][2] = '1' then
+   begin
+      Screen.Canvas.MoveTo(LeftField, Screen.Canvas.PenPos.Y + one + 5);
+      Current:= Screen.Canvas.PenPos.Y;
+      step:= Round((Screen.Picture.Width - LeftField - RightField) / 8);
+      try
+         Koef:= MakeKoef(inMonth, 8, one);
+         Screen.Canvas.Pen.Color:= Color1;
+         for i:= 1 to 8 do
+            Screen.Canvas.LineTo(Screen.Canvas.PenPos.X+step, Current - Trunc(StrToInt(inMonth[i].quantity) / StrToInt(Koef.quantity)));
+         Screen.Canvas.Pen.Color:= Color2;
+         Screen.Canvas.MoveTo(LeftField, Current);
+         for i:= 1 to 8 do
+         begin
+            wait.X:= Screen.Canvas.PenPos.X + step;
+            Screen.Canvas.LineTo(Screen.Canvas.PenPos.X+step, Current - Trunc(StrToInt(inMonth[i].picking) / (StrToInt(Koef.picking)+5)));
+            wait.Y:= Screen.Canvas.PenPos.Y;
+            Screen.Canvas.Pen.Color:= clBlack;
+            Screen.Canvas.MoveTo(wait.X, Current - 3);
+            Screen.Canvas.LineTo(wait.X, Current + 1);
+            Screen.Canvas.Pen.Color:= Color2;
+            Screen.Canvas.TextOut(wait.X-5, Current + 2, inMonth[i].date);
+            Screen.Canvas.MoveTo(wait.X, wait.Y);
+         end;
+      except
+         sleep(1);
+      end;
+      Screen.Canvas.MoveTo(LeftField,Current + 15);
+   end;
+
+   // рисуем график по году
+   if SetArray[9][3] = '1' then
+   begin
+      Screen.Canvas.MoveTo(LeftField, Screen.Canvas.PenPos.Y + one + 5);
+      Current:= Screen.Canvas.PenPos.Y;
+      step:= Round((Screen.Picture.Width - LeftField - RightField) / 12);
+      try
+         Koef:= MakeKoef(inYear, 12, one);
+         Screen.Canvas.Pen.Color:= Color1;
+         for i:= 1 to 12 do
+            Screen.Canvas.LineTo(Screen.Canvas.PenPos.X+step, Current - Trunc(StrToInt(inYear[i].quantity) / StrToInt(Koef.quantity)));
+         Screen.Canvas.Pen.Color:= Color2;
+         Screen.Canvas.MoveTo(LeftField, Current);
+         for i:= 1 to 12 do
+         begin
+            wait.X:= Screen.Canvas.PenPos.X + step;
+            Screen.Canvas.LineTo(Screen.Canvas.PenPos.X+step, Current - Trunc(StrToInt(inYear[i].picking) / (StrToInt(Koef.picking)+5)));
+            wait.Y:= Screen.Canvas.PenPos.Y;
+            Screen.Canvas.Pen.Color:= clBlack;
+            Screen.Canvas.MoveTo(wait.X, Current - 3);
+            Screen.Canvas.LineTo(wait.X, Current + 1);
+            Screen.Canvas.Pen.Color:= Color2;
+            Screen.Canvas.TextOut(wait.X-5, Current + 2, inYear[i].date);
+            Screen.Canvas.MoveTo(wait.X, wait.Y);
+         end;
+      except
+         sleep(1);
+      end;
+   end;
+end;
+
+//------------------ процедура набора данных для графиков ----------------------
+procedure DoGraphSQL(Query: TADOQuery; var inDay: array of GrPoint; var inMonth: array of GrPoint; var inYear: array of GrPoint);
+var
+   i: byte;
+   temp: string[15];
+   
+begin
+   // выбрать по дням
+   if SetArray[9][1] = '1' then
+   begin
+      Query.SQL.Clear;
+      Query.SQL.Add('SELECT SUM(ROUND(CAST(Quantity AS REAL), 0)) AS Quantity, SUM(CAST(Picking AS INT)) AS Picking, Date_Delivery ');
+      Query.SQL.Add('FROM Reports_Warehouse_Fact ');
+      Query.SQL.Add('WHERE CAST (Date_Delivery AS DATE) BETWEEN CAST(''' + BackWeek + ''' AS DATE) AND CAST(''' + FirstDate + ''' AS DATE) ');
+      Query.SQL.Add('GROUP BY Date_Delivery');
+      Query.Active:= true;
+      Query.First;
+      for i:= 1 to 14 do
+         with inDay[i] do
+         begin
+            quantity:= '0';
+            picking:= '0';
+            date:= '0';
+         end;
+      for i:= 1 to Query.RecordCount do
+      begin
+         with inDay[i] do
+         begin
+            quantity:= Query.Fields.Fields[0].AsString;
+            picking:= Query.Fields.Fields[1].AsString;
+            temp:= Query.Fields.Fields[2].AsString;
+            date:= temp[9]+temp[10]+'.'+temp[6]+temp[7];
+         end;
+         Query.Next;
+      end;
+      Query.Active:= false;
+   end;
+
+   // выбрать по месяцам
+   if SetArray[9][2] = '1' then
+   begin
+      Query.SQL.Clear;
+      Query.SQL.Add('SELECT SUM(ROUND(CAST(Quantity AS REAL), 0)) AS Quantity, SUM(CAST(Picking AS INT)) AS Picking, DATEDIFF(WK,CAST(YEAR(Date_Delivery) AS VARCHAR)+''-01-01'',Date_Delivery) + 1 AS WeekNum ');
+      Query.SQL.Add('FROM Reports_Warehouse_Fact ');
+      Query.SQL.Add('WHERE CAST (Date_Delivery AS DATE) BETWEEN CAST(''' + BackMonth + ''' AS DATE) AND CAST(''' + FirstDate + ''' AS DATE) ');
+      Query.SQL.Add('GROUP BY DATEDIFF(WK,CAST(YEAR(Date_Delivery) AS VARCHAR)+''-01-01'',Date_Delivery) + 1');
+      Query.Active:= true;
+      Query.First;
+      for i:= 1 to 8 do
+         with inMonth[i] do
+         begin
+            quantity:= '0';
+            picking:= '0';
+            date:= '0';
+         end;
+      for i:= 1 to Query.RecordCount do
+      begin
+         inMonth[i].quantity:= Query.Fields.Fields[0].AsString;
+         inMonth[i].picking:= Query.Fields.Fields[1].AsString;
+         inMonth[i].date:= Query.Fields.Fields[2].AsString;
+         Query.Next;
+      end;
+      Query.Active:= false;
+   end;
+
+   // выбрать по году
+   if SetArray[9][3] = '1' then
+   begin
+      Query.SQL.Clear;
+      Query.SQL.Add('SELECT SUM(ROUND(CAST(Quantity AS REAL), 0)) AS Quantity, SUM(CAST(Picking AS INT)) AS Picking, MONTH(CAST(Date_Delivery AS DATE)) AS Month ');
+      Query.SQL.Add('FROM Reports_Warehouse_Fact ');
+      Query.SQL.Add('WHERE CAST (Date_Delivery AS DATE) BETWEEN CAST(''' + BackYear + ''' AS DATE) AND CAST(''' + FirstDate + ''' AS DATE) ');
+      Query.SQL.Add('GROUP BY MONTH(CAST(Date_Delivery AS DATE))');
+      Query.Active:= true;
+      Query.First;
+      for i:= 1 to 13 do
+         with inYear[i] do
+         begin
+            quantity:= '0';
+            picking:= '0';
+            date:= '0';
+         end;
+      for i:= 1 to Query.RecordCount do
+      begin
+         inYear[i].quantity:= Query.Fields.Fields[0].AsString;
+         inYear[i].picking:= Query.Fields.Fields[1].AsString;
+         inYear[i].date:= Query.Fields.Fields[2].AsString;
+         Query.Next;
+      end;
+      Query.Active:= false;
+   end;
+end;
+
+end.

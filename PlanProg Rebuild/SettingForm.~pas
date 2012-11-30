@@ -1,0 +1,115 @@
+unit SettingForm;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, StdCtrls, ExtCtrls, Spin;
+
+type
+  TSetForm = class(TForm)
+    leAdress: TLabeledEdit;
+    leLogin: TLabeledEdit;
+    lePass: TLabeledEdit;
+    btOK: TButton;
+    btCancel: TButton;
+    seDateRefresh: TSpinEdit;
+    seScreenRefresh: TSpinEdit;
+    seWMSRefresh: TSpinEdit;
+    lbDateRefresh: TLabel;
+    lbScreenRefresh: TLabel;
+    lbWMSRefresh: TLabel;
+    cbWMSSync: TCheckBox;
+    cbGraph: TCheckBox;
+    cbByDay: TCheckBox;
+    cbByMonth: TCheckBox;
+    cbByYear: TCheckBox;
+    GroupBox1: TGroupBox;
+    Label1: TLabel;
+    procedure btCancelClick(Sender: TObject);
+    procedure btOKClick(Sender: TObject);
+    procedure cbGraphClick(Sender: TObject);
+    procedure cbWMSSyncClick(Sender: TObject);
+  private
+    { Private declarations }
+  public
+    { Public declarations }
+  end;
+
+var
+  SetForm: TSetForm;
+
+implementation
+
+{$R *.dfm}
+
+procedure TSetForm.btCancelClick(Sender: TObject);
+begin
+   Self.leAdress.Text:= '';
+   Self.leLogin.Text:= '';
+   Self.lePass.Text:= '';
+   Self.Close;
+end;
+
+procedure TSetForm.btOKClick(Sender: TObject);
+var
+   OutFile: TextFile;
+   str: string;
+
+begin
+   try
+      AssignFile(OutFile, 'settings.cfg');
+      Rewrite(OutFile);
+      WriteLn(OutFile, Self.leAdress.Text);
+      WriteLn(OutFile, Self.leLogin.Text);
+      WriteLn(OutFile, Self.lePass.Text);
+      WriteLn(OutFile, Self.seDateRefresh.Text);
+      WriteLn(OutFile, Self.seScreenRefresh.Text);
+      WriteLn(OutFile, Self.seWMSRefresh.Text);
+      if Self.cbWMSSync.Checked then
+         WriteLn(OutFile, '1')
+      else
+         WriteLn(OutFile, '0');
+      if Self.cbGraph.Checked then
+         WriteLn(OutFile, '1')
+      else
+         WriteLn(OutFile, '0');
+      str:='000';
+      if Self.cbByDay.Checked then
+         str[1]:= '1';
+      if self.cbByMonth.Checked then
+         str[2]:= '1';
+      if Self.cbByYear.Checked then
+         str[3]:= '1';
+      WriteLn(OutFile, str);
+      ShowMessage('Перезапустите программу для применения настроек');
+      CloseFile(OutFile);
+      Self.Close;
+   except
+      ShowMessage('При сохранении произошла ошибка');
+   end;
+end;
+
+procedure TSetForm.cbGraphClick(Sender: TObject);
+begin
+   if Self.cbGraph.Checked then
+      Self.GroupBox1.Visible:= true
+   else
+      Self.GroupBox1.Visible:= false;
+end;
+
+procedure TSetForm.cbWMSSyncClick(Sender: TObject);
+begin
+   if Self.cbWMSSync.Checked then
+   begin
+      Self.seWMSRefresh.Visible:= true;
+      Self.lbWMSRefresh.Visible:= true;
+   end
+   else
+   begin
+      Self.seWMSRefresh.Visible:= false;
+      Self.lbWMSRefresh.Visible:= false;
+   end;
+end;
+
+end.
